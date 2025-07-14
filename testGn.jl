@@ -4,90 +4,114 @@ begin
 	using MolecularGraph
 	using GraphNeuralNetworks
 	using RDKitMinimalLib
-	using Flux, Graphs, GraphNeuralNetworks
+	using Flux
+	using CSV
+	using DataFrames
+
+	#create the node data in both datastore and vector format, and indicator vector
+	function verPropTest(allSmiles)
+		atomNum, charge, lonePair = [], [], []
+		indicator, i = [], 1
+		for smiles in allSmiles
+			mol = smilestomol(smiles)
+
+			#indicator
+			atomCount = size(atom_number(mol), 1)
+			append!(indicator, fill(i, atomCount))
+			i += 1
+
+			#nodes
+			append!(atomNum, atom_number(mol))
+			append!(charge, atom_charge(mol))
+			append!(lonePair, lone_pair(mol))
+
+			#edge and graph
+		end
+		vector = [atomNum',
+				  charge',
+				  lonePair']
+		vector = reduce(vcat, vector)
+		
+		ndata = DataStore(atomicNumber = (atomNum), charge = (charge), 
+					   lonePair = (lonePair))
+		
+		return ndata, vector, indicator
+	end
+
+	#put adjacency matrices together diagonally
+	function adjMat(matrices)
+		totalRows = sum(size(mat, 1) for mat in matrices)
+		totalCols = sum(size(mat, 2) for mat in matrices)
+		result = zeros(Int, totalRows, totalCols)
+		iRow = 0
+		iCol = 0
+		for currMat in matrices
+			r, c = size(currMat)
+			result[iRow + 1: iRow + r, iCol + 1: iCol + c] .= currMat
+			iRow += r
+			iCol += c
+		end
+		return result
+	end
+
+	function getMatFromSmiles(allSmiles)
+		result = []
+		for smiles in allSmiles
+			mol = smilestomol(smiles)
+			mol = adjacency_matrix(mol.graph)
+			push!(result, mol)
+		end
+		result = adjMat(result)
+		return result
+	end
+
+	#import the smiles files
+	path = joinpath("/Users/punnaamornvivat/Desktop/SURF 2025", "mol.csv");
+	german_ref = CSV.read(path, DataFrame)
+
+	#group data into 3 types
+	#test used the smaller set of data
+	trainData, trainY = german_ref.smiles[1:5], german_ref.lipo[1:5]
+	validationData, validationY = german_ref.smiles[71:80], german_ref.lipo[71:80]
+	testData, testY = german_ref.smiles[81:end], german_ref.lipo[81:end]
+
+	#create GNNGraph from smiles
+	A = getMatFromSmiles(trainData)
+	ndata, vector, indicator = verPropTest(trainData)
+	B = GNNGraph(A; ndata = ndata, graph_indicator = Int.(indicator)) #I think this line works fine
+
+	######## this is when the code start getting weird
+	train_loader = zip(trainData, trainY)
+    	test_loader = zip(testData, testY)
+
+	#I assume this should be the function that we use the create the model
+	function GNN(din::Int, d::Int, dout::Int)  
+   		 GNNChain(GraphConv(din => d), BatchNorm(d), GraphConv(d => d, relu),
+       		 Dropout(0.5), Dense(d, dout))
+	end
 	
-	function graphProp(smiles)
-		mol = smilestomol(smiles)
-		prop = DataStore(molecularWeight = (standard_weight(mol, 1)),
-					   HA = (hydrogen_acceptor_count(mol)),
-					   HD = (hydrogen_donor_count(mol)))
-		return prop
-	end
-
-	function verProp(smiles)
-		mol = smilestomol(smiles)
-		dsVer = DataStore(atomicNumber = (atom_number(mol)),
-					   charge = (atom_charge(mol)), 
-					   lonePair = (lone_pair(mol)))
-		return dsVer
-	end
-
-	function getVerVec(smiles)
-		mol = smilestomol(smiles)
-		vec = [atom_number(mol)',
-			   atom_charge(mol)',
-			   lone_pair(mol)']
-		vec = reduce(vcat, vec)
-		return vec
-	end
-
-	function edgeProp(smiles)
-		mol = smilestomol(smiles)
-		dsEdge = DataStore(bondOrder = (bond_order(mol)),
-						  aromaticity = (is_aromatic(mol)))
-		return dsEdge
-	end
-
-	function getGNN(smiles)
-		mol = smilestomol(smiles)
-		graph = GNNGraph(mol, ndata = verProp(smiles), edata = edgeProp(smiles), gdata=graphProp(smiles))
-		dimension = size(graph, 1)
-		return graph
-	end
-
-	smiles = "O=C1CCCCCN1"
-	println(getVerVec(smiles))
+	din, d, dout = 3, 4, 1 
+	model = GNN(din, d, dout)
 	
-	using Flux, Graphs, GraphNeuralNetworks
+	function train(graph, train_loader, model)
+    		opt = Flux.setup(Adam(0.001), model)
+    		for epoch in 1:100
+       			for (x, y) in train_loader
+            			grads = Flux.gradient(model) do model
+                			ŷ = model(graph, x)
+               				Flux.mae(ŷ, y) 
+            			end
+            		Flux.update!(opt, model, grads[1])
+        		end
+        		if epoch % 10 == 0
+            			loss = mean([Flux.mae(model(graph,x), y) for (x, y) in train_loader])
+            			@show epoch, loss
+        		end
+    		end
+    		return model
+		end
 
-	struct GNN                                # step 1
-    	conv1
-    	bn
-    	conv2
-    	dropout
-    	dense
-	end
-
-	Flux.@layer GNN                         # step 2
-
-	function GNN(din::Int, d::Int, dout::Int) # step 3    
-    	GNN(GraphConv(din => d),
-        	BatchNorm(d),
-        	GraphConv(d => d, relu),
-        	Dropout(0.5),
-        	Dense(d, dout))
-	end
-
-	function (model::GNN)(g::GNNGraph, x)     # step 4
-    	x = model.conv1(g, x)
-   		x = relu.(model.bn(x))
-    	x = model.conv2(g, x)
-    	x = model.dropout(x)
-    	x = model.dense(x)
-    	return x 
-	end
-
-	smiles = "O=C1CCCCCN1"
-	graph = getGNN(smiles)
-	din = 3
-	d = 4
-	dout = 1
-	model = GNN(din, d, dout)                 # step 5
 	
-	iniVec = getVerVec(smiles)
-
-	y = model(graph, iniVec)  # output size: (dout, g.num_nodes)
-	grad = gradient(model -> sum(model(graph, iniVec)), model)
-
+	train(B, train_loader, model)
 	
 end
