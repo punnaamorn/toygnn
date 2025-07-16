@@ -81,10 +81,21 @@ begin
 	B = GNNGraph(A; ndata = ndata, graph_indicator = Int.(indicator)) #I think this line works fine
 
 	######## this is when the code start getting weird
-	train_loader = zip(trainData, trainY)
+	#this is the function I added. It creates the list of GNNGraphs
+	function createGNN(allsmiles)
+		result = []
+		for sm in allsmiles
+			mol = smilestomol(sm)
+			gnn = GNNGraph(mol)
+		end
+		return result
+	end
+
+	C = createGNN(trainData)
+    	train_loader = zip(C, trainY)
     	test_loader = zip(testData, testY)
 
-	#I assume this should be the function that we use the create the model
+
 	function GNN(din::Int, d::Int, dout::Int)  
    		 GNNChain(GraphConv(din => d), BatchNorm(d), GraphConv(d => d, relu),
        		 Dropout(0.5), Dense(d, dout))
@@ -96,21 +107,22 @@ begin
 	function train(graph, train_loader, model)
     		opt = Flux.setup(Adam(0.001), model)
     		for epoch in 1:100
-       			for (x, y) in train_loader
+        		for (x, y) in train_loader
+            			# x, y = (x, y)
             			grads = Flux.gradient(model) do model
-                			ŷ = model(graph, x)
-               				Flux.mae(ŷ, y) 
+            				ŷ = model(graph, x)
+                			Flux.mae(ŷ, y) 
             			end
-            		Flux.update!(opt, model, grads[1])
+            			Flux.update!(opt, model, grads[1])
         		end
-        		if epoch % 10 == 0
-            			loss = mean([Flux.mae(model(graph,x), y) for (x, y) in train_loader])
+        
+       			if epoch % 10 == 0
+            			loss = mean([Flux.mae(model(graph,x), y) for (x, y) in train_loader]) #it crashed here
             			@show epoch, loss
         		end
     		end
     		return model
-		end
-
+	end
 	
 	train(B, train_loader, model)
 	
